@@ -3,6 +3,7 @@
 
 #include <sourcemod>
 #include <sdktools>
+#include <steamworks>
 #include <adminmenu>
 
 #define PLUGIN_VERSION "3.0"
@@ -23,7 +24,6 @@ int iprune = 0;
 Database g_DB;
 
 ConVar
-CvarHostIp, 
 CvarPort, 
 CvarWatchlistAnnounceInterval, 
 CvarWatchlistSound, 
@@ -37,8 +37,8 @@ TopMenu hTopMenu;
 Handle WatchlistTimer;
 
 char glogFile[PLATFORM_MAX_PATH];
-char gServerIp[200];
-char gServerPort[100];
+char gServerIp[16];
+char gServerPort[8];
 
 bool IsMYSQL = true;
 bool IsSoundOn = true;
@@ -55,13 +55,12 @@ public void OnPluginStart() {
 	LoadTranslations("watchlist.phrases");
 	LoadTranslations("common.phrases");
 	
-	Database.Connect(sqlGotDatabase, "watchlist");
+	Database.Connect(SQL_OnDatabaseConnect, "watchlist");
 	
 	RegAdminCmd("watchlist_query", Command_Watchlist_Query, ADMFLAG_KICK, "watchlist_query \"steam_id | online\"", "Queries the Watchlist. Leave blank to search all.");
 	RegAdminCmd("watchlist_add", Command_Watchlist_Add, ADMFLAG_KICK, "watchlist_add \"steam_id | #userid | name\" \"reason\"", "Adds a player to the watchlist.");
 	RegAdminCmd("watchlist_remove", Command_Watchlist_Remove, ADMFLAG_KICK, "watchlist_remove \"steam_id | #userid | name\"", "Removes a player from the watchlist.");
 	
-	CvarHostIp = FindConVar("hostip");
 	CvarPort = FindConVar("hostport");
 	
 	CvarWatchlistAnnounceInterval = CreateConVar("watchlist_announce_interval", "1.0", "Controls how often users on the watchlist \nwho are currently on the server are announced. \nThe time is specified in whole minutes (1.0...10.0).", FCVAR_NONE, true, 1.0, true, 10.0);
@@ -86,41 +85,24 @@ public void OnPluginStart() {
 }
 
 
-public void GetIpPort() {
-	char sServerIp[100];
-	char sServerPort[50];
-	char sqlServerIp[200];
-	char sqlServerPort[100];
-	char ip[4];
-	
-	int longip = GetConVarInt(CvarHostIp);
-	
-	ip[0] = (longip >> 24) & 0x000000FF;
-	ip[1] = (longip >> 16) & 0x000000FF;
-	ip[2] = (longip >> 8) & 0x000000FF;
-	ip[3] = longip & 0x000000FF;
-	
-	Format(sServerIp, sizeof(sServerIp), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-	
-	CvarPort.GetString(sServerPort, sizeof(sServerPort));
-	
-	g_DB.Escape(sServerIp, sqlServerIp, sizeof(sqlServerIp));
-	g_DB.Escape(sServerPort, sqlServerPort, sizeof(sqlServerPort));
-	strcopy(gServerIp, sizeof(gServerIp), sqlServerIp);
-	strcopy(gServerPort, sizeof(gServerPort), sqlServerPort);
+stock void GetServerIP() {
+	int ip[4];
+	SteamWorks_GetPublicIP(ip);
+	Format(gServerIp, sizeof(gServerIp), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+	Format(gServerPort, sizeof(gServerPort), "%d", CvarPort.IntValue);
 }
 
-public void sqlGotDatabase(Database db, const char[] error, any data) {
+public void SQL_OnDatabaseConnect(Database db, const char[] error, any data) {
 	if (db == null) {
 		SetFailState(error);
 	}
 	
 	g_DB = db;
-	sqldbtable();
-	GetIpPort();
+	CreateTables();
+	GetServerIP();
 }
 
-void sqldbtable() {
+void CreateTables() {
 	char sdbtype[64];
 	char squery[256];
 	char query[256];
@@ -148,11 +130,11 @@ void sqldbtable() {
 		g_DB.Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS watchlist_info (stored_date DATE)ENGINE = InnoDB;");
 	}
 	
-	g_DB.Query(sqlT_Generic, query);
-	g_DB.Query(sqlT_Generic, squery);
+	g_DB.Query(SQL_OnGenericQuery, query);
+	g_DB.Query(SQL_OnGenericQuery, squery);
 }
 
-public void sqlT_Generic(Database db, DBResultSet results, const char[] error, any data) {
+public void SQL_OnGenericQuery(Database db, DBResultSet results, const char[] error, any data) {
 	if (results == null && IsLogOn) {
 		LogToFile("%T", "ERROR2", LANG_SERVER, error);
 	}
@@ -161,12 +143,13 @@ public void sqlT_Generic(Database db, DBResultSet results, const char[] error, a
 public Action ShowWatchlist(Handle timer, Handle pack) {
 	char squery[256];
 	g_DB.Format(squery, sizeof(squery), "SELECT * FROM watchlist2 WHERE serverip = '%s' AND serverport = '%s' AND ingame > 0", gServerIp, gServerPort);
-	g_DB.Query(sqlT_ShowWatchlist, squery);
+	g_DB.Query(SQL_OnWatchlistReceived, squery);
 }
 
-public void sqlT_ShowWatchlist(Database db, DBResultSet results, const char[] error, any data) {
+public void SQL_OnWatchlistReceived(Database db, DBResultSet results, const char[] error, any data) {
 	if (results == null && IsLogOn) {
 		LogToFile("%T", "ERROR2", LANG_SERVER, error);
+		return;
 	}
 	
 	while (results.FetchRow()) {
@@ -217,7 +200,7 @@ public void PrintToAdmins(const char[] stext) {
 public void DeactivateClient(const char[] sqlsteam) {
 	char squery[256];
 	g_DB.Format(squery, sizeof(squery), "UPDATE watchlist2 SET ingame = 0, serverip = '0.0.0.0', serverport = '00000' WHERE steamid = '%s'", sqlsteam);
-	g_DB.Query(sqlT_Generic, squery);
+	g_DB.Query(SQL_OnGenericQuery, squery);
 }
 
 public void OnMapStart() {
@@ -232,6 +215,7 @@ public void OnMapStart() {
 public void sqlT_PruneDatabase(Database db, DBResultSet results, const char[] error, any data) {
 	if (results == null && IsLogOn) {
 		LogToFile("%T", "ERROR2", LANG_SERVER, error);
+		return;
 	}
 	
 	if (!results.FetchRow()) {
@@ -250,6 +234,7 @@ public void sqlT_PruneDatabase(Database db, DBResultSet results, const char[] er
 public void sqlT_PruneDatabaseCmp(Database db, DBResultSet results, const char[] error, DataPack pack) {
 	if (results == null && IsLogOn) {
 		LogToFile("%T", "ERROR2", LANG_SERVER, error);
+		return;
 	}
 	
 	char squery[256];
@@ -267,7 +252,7 @@ public void sqlT_PruneDatabaseCmp(Database db, DBResultSet results, const char[]
 			else {
 				g_DB.Format(squery, sizeof(squery), "UPDATE watchlist_info SET stored_date = date('now')");
 			}
-			g_DB.Query(sqlT_Generic, squery);
+			g_DB.Query(SQL_OnGenericQuery, squery);
 		}
 	}
 	else {
@@ -278,7 +263,7 @@ public void sqlT_PruneDatabaseCmp(Database db, DBResultSet results, const char[]
 		else {
 			g_DB.Format(squery, sizeof(squery), "INSERT INTO watchlist_info (stored_date) VALUES (date('now'))");
 		}
-		g_DB.Query(sqlT_Generic, squery);
+		g_DB.Query(SQL_OnGenericQuery, squery);
 	}
 	
 	delete pack;
@@ -293,7 +278,7 @@ void PruneDatabase() {
 		g_DB.Format(squery, sizeof(squery), "DELETE FROM watchlist2 WHERE date('now', '-%i DAY') >= date", iprune);
 	}
 	
-	g_DB.Query(sqlT_Generic, squery);
+	g_DB.Query(SQL_OnGenericQuery, squery);
 	
 	if (IsLogOn) {
 		LogToFile(glogFile, "Database Pruned.");
@@ -322,6 +307,7 @@ public void OnClientPostAdminCheck(int client) {
 public void sqlT_AdminJoinQuery(Database db, DBResultSet results, const char[] error, int userid) {
 	if (results == null && IsLogOn) {
 		LogToFile("%T", "ERROR2", LANG_SERVER, error);
+		return;
 	}
 	
 	char stext[256];
@@ -362,6 +348,7 @@ public void sqlT_AdminJoinQuery(Database db, DBResultSet results, const char[] e
 public void sqlT_CheckUser(Database db, DBResultSet results, const char[] error, int userid) {
 	if (results == null && IsLogOn) {
 		LogToFile("%T", "ERROR2", LANG_SERVER, error);
+		return;
 	}
 	
 	if (!results.FetchRow()) {
@@ -400,7 +387,7 @@ public void sqlT_CheckUser(Database db, DBResultSet results, const char[] error,
 				"name = '%s', date_last_seen = date('now') WHERE steamid = '%s'", userid, gServerIp, gServerPort, sqlname, sqlsteam);
 		}
 		
-		g_DB.Query(sqlT_Generic, squery);
+		g_DB.Query(SQL_OnGenericQuery, squery);
 	}
 }
 
@@ -426,6 +413,7 @@ public void OnClientDisconnect(int client) {
 public void sqlT_ClientDC(Database db, DBResultSet results, const char[] error, DataPack pack) {
 	if (results == null && IsLogOn) {
 		LogToFile("%T", "ERROR2", LANG_SERVER, error);
+		return;
 	}
 	
 	if (!results.FetchRow()) {
@@ -484,6 +472,7 @@ public Action Command_Watchlist_Query(int client, int args) {
 public void sqlT_WatchlistQuery(Database db, DBResultSet results, const char[] error, int idata) {
 	if (results == null && IsLogOn) {
 		LogToFile("%T", "ERROR2", LANG_SERVER, error);
+		return;
 	}
 	
 	char stext[256];
@@ -564,6 +553,7 @@ public Action Command_Watchlist_Add(int client, int args) {
 public void sqlT_CommandWatchlistAdd(Database db, DBResultSet results, const char[] error, DataPack pack) {
 	if (results == null && IsLogOn) {
 		LogToFile("%T", "ERROR2", LANG_SERVER, error);
+		return;
 	}
 	
 	char pclient[25];
@@ -641,6 +631,7 @@ void WatchlistAdd(int client, int target, char[] sqlsteam, char[] sreason) {
 public void sqlT_WatchlistAdd(Database db, DBResultSet results, const char[] error, DataPack pack) {
 	if (results == null && IsLogOn) {
 		LogToFile("%T", "ERROR2", LANG_SERVER, error);
+		return;
 	}
 	
 	char stext[256];
@@ -717,6 +708,7 @@ public Action Command_Watchlist_Remove(int client, int args) {
 public void sqlT_CommandWatchlistRemove(Database db, DBResultSet results, const char[] error, DataPack pack) {
 	if (results == null && IsLogOn) {
 		LogToFile("%T", "ERROR2", LANG_SERVER, error);
+		return;
 	}
 	
 	char pclient[25];
@@ -756,6 +748,7 @@ void WatchlistRemove(int client, char[] sqlsteam) {
 public void sqlT_WatchlistRemove(Database db, DBResultSet results, const char[] error, DataPack pack) {
 	if (results == null && IsLogOn) {
 		LogToFile("%T", "ERROR2", LANG_SERVER, error);
+		return;
 	}
 	
 	char stext[256];
@@ -967,6 +960,7 @@ void FindWatchlistTargetsMenu(int client) {
 public void sqlWatchlistRemoveTargetMenu(Database db, DBResultSet results, const char[] error, int client) {
 	if (results == null && IsLogOn) {
 		LogToFile("%T", "ERROR2", LANG_SERVER, error);
+		return;
 	}
 	
 	Menu menu = new Menu(MenuWatchlistRemoveTarget);
